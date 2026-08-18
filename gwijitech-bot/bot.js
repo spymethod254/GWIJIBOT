@@ -2,7 +2,7 @@ import { default as makeWASocket, useMultiFileAuthState, DisconnectReason } from
 import { createClient } from '@supabase/supabase-js'
 import NodeCache from 'node-cache'
 import { handleCommand } from './commands/index.js'
-import { showMenu, showAIMenu, showSettingsMenu, showDownloadMenu, showGroupMenu, showFunMenu } from './commands/menus.js'
+import { showMenu, showAIMenu, showSettingsMenu, showGroupMenu, showFunMenu } from './commands/menus.js'
 import { Boom } from '@hapi/boom'
 import pino from 'pino'
 
