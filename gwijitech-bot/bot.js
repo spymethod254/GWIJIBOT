@@ -1,22 +1,55 @@
-import { default as makeWASocket, useMultiFileAuthState, DisconnectReason, Browsers } from '@whiskeysockets/baileys'
+import { default as makeWASocket, useMultiFileAuthState, DisconnectReason, Browsers, initAuthCreds, proto } from '@whiskeysockets/baileys'
 import { createClient } from '@supabase/supabase-js'
+import { createStorageClient } from '@supabase/storage-js'
 import pino from 'pino'
 import { showMenu, showAIMenu, showSettingsMenu, showGroupMenu, showFunMenu } from './commands/menus.js'
 import NodeCache from 'node-cache'
+import fs from 'fs'
+import path from 'path'
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY)
+const storage = createStorageClient(process.env.SUPABASE_URL, { apikey: process.env.SUPABASE_SERVICE_KEY })
+const BUCKET = 'baileys-session'
 const msgRetryCounterCache = new NodeCache()
 
 const BOT_NAME = 'GWIJITECH MD'
 const PREFIX = '.'
 
+// Custom auth state that saves to Supabase Storage
+async function useSupabaseAuthState() {
+    const dir = './session'
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir)
+
+    // Download session from storage
+    const { data } = await storage.from(BUCKET).list('')
+    if(data) {
+        for(const file of data) {
+            const { data: fileData } = await storage.from(BUCKET).download(file.name)
+            fs.writeFileSync(path.join(dir, file.name), Buffer.from(await fileData.arrayBuffer()))
+        }
+    }
+
+    const { state, saveCreds } = await useMultiFileAuthState(dir)
+
+    const saveToSupabase = async () => {
+        const files = fs.readdirSync(dir)
+        for(const file of files) {
+            const fileData = fs.readFileSync(path.join(dir, file))
+            await storage.from(BUCKET).upload(file, fileData, { upsert: true })
+        }
+    }
+
+    return { state, saveCreds: async () => { await saveCreds(); await saveToSupabase() } }
+}
+
 async function startBot() {
-    const { state, saveCreds } = await useMultiFileAuthState('session')
+    await storage.from(BUCKET).list('').catch(() => storage.createBucket(BUCKET, { public: false }))
+    const { state, saveCreds } = await useSupabaseAuthState()
 
     const sock = makeWASocket({
         auth: state,
         logger: pino({ level: 'info' }),
-        printQRInTerminal: true, // <-- QR will print in logs
+        printQRInTerminal: true,
         msgRetryCounterCache,
         browser: Browsers.macOS('Chrome')
     })
@@ -27,7 +60,6 @@ async function startBot() {
         const { connection, lastDisconnect } = update
         if(connection === 'close') {
             const shouldReconnect = (lastDisconnect.error)?.output?.statusCode!== DisconnectReason.loggedOut
-            console.log('Connection closed. Reconnecting:', shouldReconnect)
             if(shouldReconnect) startBot()
         } else if(connection === 'open') {
             console.log('✅ Connected to WhatsApp')
@@ -40,8 +72,6 @@ async function startBot() {
         const body = m.message.conversation || m.message.extendedTextMessage?.text || ''
         const sender = m.key.remoteJid
         const senderName = m.pushName || 'User'
-
-        await supabase.from('logs').insert({ user_id: 'main-bot-owner-id', sender, message: body, type: 'text' })
 
         if(!body.startsWith(PREFIX)) return
         const args = body.slice(PREFIX.length).trim().split(/ +/)
