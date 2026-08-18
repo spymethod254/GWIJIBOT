@@ -98,4 +98,10 @@ async function startBot() {
   })
 }
 
+// Keep alive
+process.on('SIGINT', () => sock.logout())
+process.on('SIGTERM', () => sock.logout())
+process.on('uncaughtException', err => console.log('Error:', err))
+process.on('unhandledRejection', err => console.log('Error:', err))
+
 startBot()
