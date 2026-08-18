@@ -1,65 +1,62 @@
-import { default as makeWASocket, useMultiFileAuthState, DisconnectReason, Browsers, initAuthCreds, proto } from '@whiskeysockets/baileys'
+import { default as makeWASocket, useMultiFileAuthState, DisconnectReason, Browsers } from '@whiskeysockets/baileys'
 import { createClient } from '@supabase/supabase-js'
-import { createStorageClient } from '@supabase/storage-js'
 import pino from 'pino'
 import { showMenu, showAIMenu, showSettingsMenu, showGroupMenu, showFunMenu } from './commands/menus.js'
 import NodeCache from 'node-cache'
-import fs from 'fs'
+import fs from 'fs/promises'
 import path from 'path'
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY)
-const storage = createStorageClient(process.env.SUPABASE_URL, { apikey: process.env.SUPABASE_SERVICE_KEY })
 const BUCKET = 'baileys-session'
+const SESSION_DIR = './session'
 const msgRetryCounterCache = new NodeCache()
 
 const BOT_NAME = 'GWIJITECH MD'
 const PREFIX = '.'
 
-// Custom auth state that saves to Supabase Storage
-async function useSupabaseAuthState() {
-    const dir = './session'
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir)
-
-    // Download session from storage
-    const { data } = await storage.from(BUCKET).list('')
-    if(data) {
-        for(const file of data) {
-            const { data: fileData } = await storage.from(BUCKET).download(file.name)
-            fs.writeFileSync(path.join(dir, file.name), Buffer.from(await fileData.arrayBuffer()))
-        }
+async function downloadSession() {
+    await fs.mkdir(SESSION_DIR, { recursive: true })
+    const { data: files } = await supabase.storage.from(BUCKET).list()
+    if(!files) return
+    for(const file of files) {
+        const { data } = await supabase.storage.from(BUCKET).download(file.name)
+        if(data) await fs.writeFile(path.join(SESSION_DIR, file.name), Buffer.from(await data.arrayBuffer()))
     }
+}
 
-    const { state, saveCreds } = await useMultiFileAuthState(dir)
-
-    const saveToSupabase = async () => {
-        const files = fs.readdirSync(dir)
-        for(const file of files) {
-            const fileData = fs.readFileSync(path.join(dir, file))
-            await storage.from(BUCKET).upload(file, fileData, { upsert: true })
-        }
+async function uploadSession() {
+    const files = await fs.readdir(SESSION_DIR)
+    for(const file of files) {
+        const fileData = await fs.readFile(path.join(SESSION_DIR, file))
+        await supabase.storage.from(BUCKET).upload(file, fileData, { upsert: true })
     }
-
-    return { state, saveCreds: async () => { await saveCreds(); await saveToSupabase() } }
 }
 
 async function startBot() {
-    await storage.from(BUCKET).list('').catch(() => storage.createBucket(BUCKET, { public: false }))
-    const { state, saveCreds } = await useSupabaseAuthState()
+    // Create bucket if not exists
+    await supabase.storage.createBucket(BUCKET, { public: false }).catch(()=>{})
+    await downloadSession()
+
+    const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR)
 
     const sock = makeWASocket({
         auth: state,
-        logger: pino({ level: 'info' }),
+        logger: pino({ level: 'warn' }),
         printQRInTerminal: true,
         msgRetryCounterCache,
         browser: Browsers.macOS('Chrome')
     })
 
-    sock.ev.on('creds.update', saveCreds)
+    sock.ev.on('creds.update', async () => {
+        await saveCreds()
+        await uploadSession() // upload every time creds change
+    })
 
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect } = update
         if(connection === 'close') {
             const shouldReconnect = (lastDisconnect.error)?.output?.statusCode!== DisconnectReason.loggedOut
+            console.log('Connection closed. Reconnecting:', shouldReconnect)
             if(shouldReconnect) startBot()
         } else if(connection === 'open') {
             console.log('✅ Connected to WhatsApp')
